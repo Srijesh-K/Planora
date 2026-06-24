@@ -594,9 +594,9 @@
 
   <!-- HERO -->
   <div class="hero">
-    <div class="hero-tag">✦ AI-Powered Viewpoint Discovery</div>
-    <h1>Find the World's<br>Most Stunning Views</h1>
-    <p>Type any place on Earth. Discover hidden vantage points, scenic overlooks, and breathtaking viewpoints nearby — with distances, ratings & traveler tips.</p>
+    <div class="hero-tag">✦ Curated Trip Planner</div>
+    <h1>Plan Your Trip &<br>Discover Nearby Spots</h1>
+    <p>Enter a destination to explore nearby tourist places — viewpoints, landmarks, and hidden gems with distances, ratings, and traveler tips.</p>
 
     <!-- Search -->
     <div class="search-wrap">
@@ -667,7 +667,7 @@
   <div class="loading-wrap" id="loading-wrap">
     <div class="spinner"></div>
     <div class="loading-text">
-      Scanning viewpoints<span class="loading-dot">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span>
+      Loading places<span class="loading-dot">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span>
     </div>
   </div>
 
@@ -996,8 +996,56 @@ function create3DCardScene(canvas, type) {
   loop();
 }
 
-// ─── SEARCH & API ────────────────────────────────────────────────────────────
+// ─── SEARCH & JSON DATA ─────────────────────────────────────────────────────
 let currentData = [];
+let placesDatabase = null;
+let lastResult = null;
+
+async function loadPlacesData() {
+  if (placesDatabase) return placesDatabase;
+  const response = await fetch('tourist-places.json');
+  if (!response.ok) throw new Error('Could not load tourist places data.');
+  placesDatabase = await response.json();
+  return placesDatabase;
+}
+
+function normalize(str) {
+  return str.toLowerCase().trim().replace(/[,.\-']/g, ' ').replace(/\s+/g, ' ');
+}
+
+function findDestination(query, destinations) {
+  const q = normalize(query);
+  if (!q) return null;
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const dest of destinations) {
+    const terms = [dest.location, ...(dest.aliases || [])].map(normalize);
+
+    for (const term of terms) {
+      let score = 0;
+      if (term === q) score = 100;
+      else if (term.includes(q) || q.includes(term)) score = 80;
+      else {
+        const qWords = q.split(' ').filter(w => w.length > 2);
+        const matches = qWords.filter(w => term.includes(w));
+        if (matches.length) score = 40 + matches.length * 15;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = dest;
+      }
+    }
+  }
+
+  return bestScore >= 40 ? best : null;
+}
+
+function filterByRadius(viewpoints, radiusKm) {
+  const r = parseFloat(radiusKm);
+  return viewpoints.filter(vp => vp.distance_num <= r);
+}
 
 function setSearch(val) {
   document.getElementById('search-input').value = val;
@@ -1008,6 +1056,14 @@ document.getElementById('search-input').addEventListener('keypress', e => {
   if (e.key === 'Enter') doSearch();
 });
 
+document.getElementById('sort-select').addEventListener('change', () => {
+  if (lastResult) renderResults(lastResult, document.getElementById('sort-select').value);
+});
+
+document.getElementById('radius-slider').addEventListener('change', () => {
+  if (document.getElementById('search-input').value.trim()) doSearch();
+});
+
 async function doSearch() {
   const query = document.getElementById('search-input').value.trim();
   if (!query) return;
@@ -1015,68 +1071,33 @@ async function doSearch() {
   const radius = document.getElementById('radius-slider').value;
   const sort = document.getElementById('sort-select').value;
 
-  // UI state
   document.getElementById('error-box').classList.remove('active');
   document.getElementById('results-wrap').classList.remove('active');
   document.getElementById('loading-wrap').classList.add('active');
   document.getElementById('search-btn').disabled = true;
 
   try {
-    const prompt = `You are a travel expert and viewpoint discovery AI.
-The user wants to find the best viewpoints near: "${query}"
-Search radius: ${radius}km
-Sort by: ${sort}
+    const db = await loadPlacesData();
+    const destination = findDestination(query, db.destinations);
 
-Return ONLY valid JSON (no markdown, no backticks, no explanation) with this exact structure:
-{
-  "location": "Full name of the searched location",
-  "summary": "One sentence about this area's viewpoint scene",
-  "viewpoints": [
-    {
-      "name": "Viewpoint Name",
-      "type": "mountain|coastal|urban|canyon|forest|island|valley|desert|lake",
-      "subtype": "descriptive subtype e.g. Clifftop Overlook",
-      "distance": "X.X km",
-      "distance_num": 3.2,
-      "rating": 4.7,
-      "rating_text": "4.7 / 5.0",
-      "description": "2-3 sentences describing this viewpoint and what you can see from it.",
-      "best_time": "Golden Hour / Sunrise / Sunset / Night / Midday",
-      "difficulty": "Easy / Moderate / Challenging",
-      "badge": "Best View|Hidden Gem|Popular|Scenic|Iconic",
-      "tags": ["Panoramic", "Accessible", "Photography"],
-      "tips": ["Tip 1 about visiting", "Tip 2", "Tip 3"],
-      "coordinates": "approx lat,lng as string e.g. 48.8584,2.2945",
-      "rank": 1
-    }
-  ]
-}
-
-Generate 6-8 realistic, specific viewpoints near ${query} within ${radius}km. Include a mix of types. Make names, distances, descriptions, and tips specific and realistic for that location.`;
-
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 3000,
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-
-    if (!response.ok) throw new Error(`API error: ${response.status}`);
-    const data = await response.json();
-    const text = data.content.map(b => b.text || '').join('');
-
-    let parsed;
-    try {
-      const clean = text.replace(/```json|```/g, '').trim();
-      parsed = JSON.parse(clean);
-    } catch {
-      throw new Error('Could not parse viewpoint data. Please try again.');
+    if (!destination) {
+      const suggestions = db.destinations.map(d => d.location).join(', ');
+      throw new Error(`No places found for "${query}". Try: ${suggestions}`);
     }
 
-    currentData = parsed.viewpoints || [];
+    const filtered = filterByRadius(destination.viewpoints, radius);
+    if (!filtered.length) {
+      throw new Error(`No spots within ${radius}km of ${destination.location}. Try increasing the radius.`);
+    }
+
+    const parsed = {
+      location: destination.location,
+      summary: destination.summary,
+      viewpoints: filtered
+    };
+
+    currentData = parsed.viewpoints;
+    lastResult = parsed;
     renderResults(parsed, sort);
 
   } catch (err) {
